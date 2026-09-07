@@ -164,7 +164,7 @@ def pipeline(g):
     return steps,g
 
 # ---------- parse tree ----------
-def nnode(s,failed=False): return {"symbol":s,"children":[],"failed":failed}
+def nnode(s,failed=False): return {"symbol":s,"children":[],"failed":failed,"highlight":None}
 
 def leaves(n):
     if not n["children"]: return [n]
@@ -173,7 +173,7 @@ def leaves(n):
     return z
 
 def copytree(n):
-    return {"symbol":n["symbol"],"children":[copytree(c) for c in n["children"]],"failed":n.get("failed",False)}
+    return {"symbol":n["symbol"],"children":[copytree(c) for c in n["children"]],"failed":n.get("failed",False),"highlight":n.get("highlight")}
 
 def target_tokens(s,g):
     if not s.strip(): return []
@@ -187,6 +187,25 @@ def target_tokens(s,g):
         if not hit:return None
         out.append(hit);i+=len(hit)
     return None
+
+
+def mark_end_terminal(tree, terminals, target, valid):
+    """Highlight the ending terminal: green for valid, red for invalid."""
+    terminal_leaves=[x for x in leaves(tree) if x["symbol"] in terminals]
+    if not terminal_leaves:
+        return
+    if valid:
+        terminal_leaves[-1]["highlight"]="valid_end"
+        return
+    # For an invalid string, highlight the last terminal that matches the input prefix.
+    matched=0
+    for leaf, expected in zip(terminal_leaves, target):
+        if leaf["symbol"]==expected:
+            matched += 1
+        else:
+            break
+    node=terminal_leaves[matched-1] if matched>0 else terminal_leaves[-1]
+    node["highlight"]="invalid_end"
 
 def parse_tree(g,target):
     root=nnode(g["start"]); queue=[([g["start"]],root)]; seen=set(); limit=30000
@@ -244,8 +263,113 @@ def gen_one(g,maxlen):
         if sum(x in g["terminals"] for x in q)<=maxlen and len(q)<=maxlen+len(g["variables"])+15:cur=q
     return None
 
+
+# ---------- grammar examples, random CFG and statistics ----------
+GRAMMAR_EXAMPLES = {
+    "arithmetic": {
+        "name": "Arithmetic Expression Grammar",
+        "variables": "E, T, F",
+        "terminals": "id, +, *, (, )",
+        "start": "E",
+        "productions": "E -> E + T | T\nT -> T * F | F\nF -> ( E ) | id"
+    },
+    "epsilon": {
+        "name": "Epsilon and Unit Production Example",
+        "variables": "S, A, B",
+        "terminals": "a, b",
+        "start": "S",
+        "productions": "S -> a A B\nA -> b B b | b b\nB -> A | ϵ"
+    },
+    "palindrome": {
+        "name": "Palindrome Grammar",
+        "variables": "S",
+        "terminals": "a, b",
+        "start": "S",
+        "productions": "S -> a S a | b S b | a | b | ϵ"
+    },
+    "simple": {
+        "name": "Simple a^n b^n Grammar",
+        "variables": "S",
+        "terminals": "a, b",
+        "start": "S",
+        "productions": "S -> a S b | a b"
+    }
+}
+
+def random_cfg(num_variables=3, num_terminals=2):
+    num_variables=max(1,min(8,int(num_variables)))
+    num_terminals=max(1,min(5,int(num_terminals)))
+    base_vars=["S","A","B","C","D","E","F","G"][:num_variables]
+    term_pool=["a","b","c","d","e"][:num_terminals]
+    rules=[]
+    for i,v in enumerate(base_vars):
+        t1=random.choice(term_pool)
+        t2=random.choice(term_pool)
+        # Every variable gets a terminating rule and a recursive/expanding rule.
+        if i < len(base_vars)-1:
+            nxt=base_vars[i+1]
+            rules.append(f"{v} -> {t1} {nxt} | {t2}")
+        else:
+            rules.append(f"{v} -> {t1} S | {t2}")
+    return {
+        "variables": ", ".join(base_vars),
+        "terminals": ", ".join(term_pool),
+        "start": "S",
+        "productions": "\n".join(rules)
+    }
+
+def grammar_statistics(g):
+    all_rules=[r for rs in g["rules"].values() for r in rs]
+    eps_count=sum(1 for r in all_rules if not r)
+    unit_count=sum(1 for r in all_rules if len(r)==1 and r[0] in g["variables"])
+    rec=sum(1 for a,rs in g["rules"].items() for r in rs if r and r[0]==a)
+    used_vars={x for r in all_rules for x in r if x in g["variables"]}
+    unreachable=[]
+    reach={g["start"]}; changed=True
+    while changed:
+        changed=False
+        for a in list(reach):
+            for r in g["rules"].get(a,[]):
+                for x in r:
+                    if x in g["variables"] and x not in reach:
+                        reach.add(x); changed=True
+    unreachable=[v for v in g["variables"] if v not in reach]
+    complexity="Low" if len(all_rules)<=5 else ("Medium" if len(all_rules)<=12 else "High")
+    return {
+        "variables":len(g["variables"]),
+        "terminals":len(g["terminals"]),
+        "productions":len(all_rules),
+        "epsilon_productions":eps_count,
+        "unit_productions":unit_count,
+        "left_recursive_rules":rec,
+        "unreachable":unreachable,
+        "complexity":complexity,
+        "start":g["start"]
+    }
+
 @app.route("/")
 def home(): return render_template("index.html")
+
+
+@app.get("/api/examples")
+def examples():
+    return jsonify({"success":True,"examples":GRAMMAR_EXAMPLES})
+
+@app.post("/api/random")
+def random_grammar():
+    try:
+        d=request.json or {}
+        return jsonify({"success":True,"grammar":random_cfg(d.get("variables",3),d.get("terminals",2))})
+    except Exception as e:
+        return jsonify({"success":False,"error":str(e)}),400
+
+@app.post("/api/stats")
+def stats():
+    try:
+        g=parse_grammar(request.json or {})
+        return jsonify({"success":True,"stats":grammar_statistics(g)})
+    except Exception as e:
+        return jsonify({"success":False,"error":str(e)}),400
 
 @app.post("/api/analyze")
 def analyze():
@@ -261,10 +385,17 @@ def check():
         d=request.json or {}; g=parse_grammar(d); start=d.get("parseStart","").strip() or g["start"]
         if start not in g["variables"]:raise ValueError("Parse start variable is not defined.")
         g["start"]=start; target=target_tokens(d.get("testString",""),g)
-        if target is None:return jsonify({"success":True,"valid":False,"message":"Input contains a symbol that is not a declared terminal.","tree":attempted_tree(g,[])})
+        if target is None:
+            tr=attempted_tree(g,[])
+            mark_end_terminal(tr,g["terminals"],[],False)
+            return jsonify({"success":True,"valid":False,"message":"Input contains a symbol that is not a declared terminal.","tree":tr})
         ok,tr=parse_tree(g,target)
-        if ok:return jsonify({"success":True,"valid":True,"message":"Complete parse tree generated from the grammar.","tree":tr})
-        return jsonify({"success":True,"valid":False,"message":"String is not generated by this grammar. The tree shows an attempted parse.","tree":attempted_tree(g,target)})
+        if ok:
+            mark_end_terminal(tr,g["terminals"],target,True)
+            return jsonify({"success":True,"valid":True,"message":"Complete parse tree generated from the grammar.","tree":tr})
+        tr=attempted_tree(g,target)
+        mark_end_terminal(tr,g["terminals"],target,False)
+        return jsonify({"success":True,"valid":False,"message":"String is not generated by this grammar. The tree shows an attempted parse.","tree":tr})
     except Exception as e:return jsonify({"success":False,"error":str(e)}),400
 
 @app.post("/api/generate")
@@ -293,4 +424,4 @@ def download():
     return Response(content,mimetype=mime,headers={"Content-Disposition":f"attachment; filename={fn}"})
 
 if __name__=="__main__":
-    app.run(debug=True,host="127.0.0.1",port=5000)
+    app.run(debug=True,host="0.0.0.0",port=5000)
