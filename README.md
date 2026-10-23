@@ -8,7 +8,7 @@ venv\Scripts\activate
 pip install -r requirements.txt
 python app.py
 ```
-
+Open website:- https://toc-f7xj.onrender.com
 Open http://127.0.0.1:5000/
 
 Test:
